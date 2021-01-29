@@ -11,7 +11,7 @@ use graph::{
     prelude::SubgraphManifest,
     prelude::SubgraphName,
     prelude::SubgraphVersionSwitchingMode,
-    prelude::{CheapClone, NodeId, Store as _, SubgraphDeploymentId},
+    prelude::{o, slog, CheapClone, Logger, NodeId, Store as _, SubgraphDeploymentId},
 };
 use graph_store_postgres::layout_for_tests::Connection as Primary;
 use graph_store_postgres::NetworkStore;
@@ -538,5 +538,49 @@ fn fatal_vs_non_fatal() {
             .has_non_fatal_errors(id.cheap_clone(), None)
             .await
             .unwrap());
+    })
+}
+
+#[test]
+fn fail_unfail() {
+    fn setup() -> SubgraphDeploymentId {
+        let id = SubgraphDeploymentId::new("failUnfail").unwrap();
+        remove_subgraphs();
+        create_test_subgraph(&id, SUBGRAPH_GQL);
+        id
+    }
+
+    run_test_sequentially(setup, |store, id| async move {
+        let logger = Logger::root(slog::Discard, o!());
+        let query_store = store.query_store(id.cheap_clone().into(), false).unwrap();
+
+        let error = SubgraphError {
+            subgraph_id: id.clone(),
+            message: "test".to_string(),
+            block_ptr: Some(BLOCKS[1]),
+            handler: None,
+            deterministic: true,
+        };
+
+        store.fail_subgraph(id.clone(), error).await.unwrap();
+
+        assert!(!query_store
+            .has_non_fatal_errors(id.cheap_clone(), None)
+            .await
+            .unwrap());
+
+        // This will unfail the subgraph and delete the fatal error.
+        store.start_subgraph_deployment(&logger, &id).unwrap();
+
+        // Advance the block ptr to the block of the deleted error.
+        transact_entity_operations(&store, id.cheap_clone(), BLOCKS[1], vec![]).unwrap();
+
+        // We still have no fatal errors.
+        assert!(!query_store
+            .has_non_fatal_errors(id.cheap_clone(), None)
+            .await
+            .unwrap());
+
+        test_store::remove_subgraphs();
     })
 }
